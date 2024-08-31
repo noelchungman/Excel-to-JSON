@@ -26,15 +26,42 @@
 </head>
 <body>
     <h1>Searchable To-Do List</h1>
-    <form id="uploadForm" enctype="multipart/form-data">
-        <label for="file">Upload Excel or CSV File:</label>
-        <input type="file" id="file" name="file" accept=".xlsx, .xls, .csv" required>
+    <form id="dataForm" enctype="multipart/form-data">
+        <label>
+            <input type="radio" name="source" value="upload" checked>
+            Upload Excel or CSV File
+        </label>
+        <br>
+        <label>
+            <input type="radio" name="source" value="sameDomain">
+            Read from Same Domain
+        </label>
+        <br>
+        <label>
+            <input type="radio" name="source" value="onlineFile">
+            Online File URL
+        </label>
+        <br>
+        <label>
+            <input type="radio" name="source" value="googleSheet">
+            Google Sheet URL
+        </label>
+        <br>
+        <input type="file" id="file" name="file" accept=".xlsx, .xls, .csv" style="display: block;">
+        <input type="text" id="sameDomainFilePath" name="sameDomainFilePath" placeholder="Enter file path (e.g., /data.xlsx)" style="display: none;">
+        <input type="text" id="onlineFileUrl" name="onlineFileUrl" placeholder="Enter file URL (e.g., https://example.com/data.xlsx)" style="display: none;">
+        <input type="text" id="googleSheetUrl" name="googleSheetUrl" placeholder="Enter Google Sheet URL" style="display: none;">
         <br>
         <label for="titleRow">Title Row:</label>
         <input type="number" id="titleRow" name="titleRow" required>
         <br>
-        <button type="submit">Upload and Process</button>
+        <button type="submit">Load Data</button>
     </form>
+    <label for="titleDropdown" style="display:none;">Search in:</label>
+    <select id="titleDropdown" style="display:none;">
+        <option value="all">All</option>
+    </select>
+    <br>
     <input type="text" id="searchInput" placeholder="Search..." style="display:none;">
     <table id="todoTable" style="display:none;">
         <thead>
@@ -46,30 +73,127 @@
             <!-- Data will be inserted here -->
         </tbody>
     </table>
+    <p id="timestamp" style="display:none;">Last loaded: <span id="timestampValue"></span></p>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.0/xlsx.full.min.js"></script>
     <script>
-        document.getElementById('uploadForm').addEventListener('submit', function(event) {
-            event.preventDefault();
-            const formData = new FormData();
-            formData.append('file', document.getElementById('file').files[0]);
-            formData.append('titleRow', document.getElementById('titleRow').value);
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('dataForm');
+            const fileInput = document.getElementById('file');
+            const sameDomainFilePathInput = document.getElementById('sameDomainFilePath');
+            const onlineFileUrlInput = document.getElementById('onlineFileUrl');
+            const googleSheetUrlInput = document.getElementById('googleSheetUrl');
+            const searchInput = document.getElementById('searchInput');
+            const tableHeaders = document.getElementById('tableHeaders');
+            const tableBody = document.querySelector('#todoTable tbody');
+            const titleDropdown = document.getElementById('titleDropdown');
+            const titleDropdownLabel = document.querySelector('label[for="titleDropdown"]');
+            const timestamp = document.getElementById('timestamp');
+            const timestampValue = document.getElementById('timestampValue');
 
-            fetch('/upload', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                const tableHeaders = document.getElementById('tableHeaders');
-                const tableBody = document.querySelector('#todoTable tbody');
+            let currentData = [];
+            let headers = [];
 
+            form.addEventListener('change', function(event) {
+                const source = form.source.value;
+                fileInput.style.display = source === 'upload' ? 'block' : 'none';
+                sameDomainFilePathInput.style.display = source === 'sameDomain' ? 'block' : 'none';
+                onlineFileUrlInput.style.display = source === 'onlineFile' ? 'block' : 'none';
+                googleSheetUrlInput.style.display = source === 'googleSheet' ? 'block' : 'none';
+            });
+
+            form.addEventListener('submit', function(event) {
+                event.preventDefault();
+                const source = form.source.value;
+                const titleRow = document.getElementById('titleRow').value;
+
+                if (source === 'upload') {
+                    const formData = new FormData();
+                    formData.append('file', fileInput.files[0]);
+                    formData.append('titleRow', titleRow);
+
+                    fetch('/upload', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        currentData = data;
+                        headers = Object.keys(data[0]);
+                        populateTable(data);
+                        populateDropdown(headers);
+                        updateTimestamp();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                } else if (source === 'sameDomain') {
+                    const filePath = sameDomainFilePathInput.value;
+                    fetch(`/same-domain?filePath=${encodeURIComponent(filePath)}&titleRow=${titleRow}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        currentData = data;
+                        headers = Object.keys(data[0]);
+                        populateTable(data);
+                        populateDropdown(headers);
+                        updateTimestamp();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                } else if (source === 'onlineFile') {
+                    const fileUrl = onlineFileUrlInput.value;
+                    fetch(fileUrl)
+                    .then(response => response.arrayBuffer())
+                    .then(data => {
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const sheetName = workbook.SheetNames[0];
+                        const sheet = workbook.Sheets[sheetName];
+                        const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+                        // Extract titles and data
+                        const titles = jsonData[titleRow - 1];
+                        const tableData = jsonData.slice(titleRow).map(row => {
+                            const obj = {};
+                            titles.forEach((title, index) => {
+                                obj[title] = row[index];
+                            });
+                            return obj;
+                        });
+
+                        currentData = tableData;
+                        headers = titles;
+                        populateTable(tableData);
+                        populateDropdown(titles);
+                        updateTimestamp();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                } else if (source === 'googleSheet') {
+                    const googleSheetUrl = googleSheetUrlInput.value;
+                    fetch(`/google-sheet?url=${encodeURIComponent(googleSheetUrl)}&titleRow=${titleRow}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        currentData = data;
+                        headers = Object.keys(data[0]);
+                        populateTable(data);
+                        populateDropdown(headers);
+                        updateTimestamp();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                }
+            });
+
+            function populateTable(data) {
                 // Clear previous data
                 tableHeaders.innerHTML = '';
                 tableBody.innerHTML = '';
 
                 // Dynamically create table headers
                 if (data.length > 0) {
-                    const headers = Object.keys(data[0]);
                     headers.forEach(header => {
                         const th = document.createElement('th');
                         th.textContent = header;
@@ -81,35 +205,72 @@
                         const tr = document.createElement('tr');
                         headers.forEach(header => {
                             const td = document.createElement('td');
-                            td.textContent = row[header];
+                            td.textContent = row[header] || '';
                             tr.appendChild(td);
                         });
                         tableBody.appendChild(tr);
                     });
 
-                    // Show the search input and table
-                    document.getElementById('searchInput').style.display = 'block';
+                    // Show the search input, dropdown, and table
+                    searchInput.style.display = 'block';
+                    titleDropdown.style.display = 'block';
+                    titleDropdownLabel.style.display = 'block';
                     document.getElementById('todoTable').style.display = 'table';
                 }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-            });
-        });
+            }
 
-        // Implement search functionality
-        document.getElementById('searchInput').addEventListener('input', function() {
-            const searchTerm = this.value.toLowerCase();
-            const rows = document.querySelectorAll('#todoTable tbody tr');
-            rows.forEach(row => {
-                const cells = row.querySelectorAll('td');
-                let match = false;
-                cells.forEach(cell => {
-                    if (cell.textContent.toLowerCase().includes(searchTerm)) {
-                        match = true;
+            function populateDropdown(titles) {
+                // Clear previous options
+                titleDropdown.innerHTML = '<option value="all">All</option>';
+
+                // Populate dropdown with titles
+                titles.forEach(title => {
+                    const option = document.createElement('option');
+                    option.value = title;
+                    option.textContent = title;
+                    titleDropdown.appendChild(option);
+                });
+            }
+
+            function updateTimestamp() {
+                const now = new Date();
+                timestampValue.textContent = now.toLocaleString();
+                timestamp.style.display = 'block';
+            }
+
+            // Implement search functionality
+            searchInput.addEventListener('input', function() {
+                const searchTerm = this.value.toLowerCase();
+                const selectedTitle = titleDropdown.value;
+
+                const filteredData = currentData.filter(row => {
+                    if (selectedTitle === 'all') {
+                        return Object.values(row).some(value => 
+                            value && value.toString().toLowerCase().includes(searchTerm)
+                        );
+                    } else {
+                        return row[selectedTitle] && row[selectedTitle].toString().toLowerCase().includes(searchTerm);
                     }
                 });
-                row.style.display = match ? '' : 'none';
+
+                populateTable(filteredData);
+            });
+
+            titleDropdown.addEventListener('change', function() {
+                const searchTerm = searchInput.value.toLowerCase();
+                const selectedTitle = titleDropdown.value;
+
+                const filteredData = currentData.filter(row => {
+                    if (selectedTitle === 'all') {
+                        return Object.values(row).some(value => 
+                            value && value.toString().toLowerCase().includes(searchTerm)
+                        );
+                    } else {
+                        return row[selectedTitle] && row[selectedTitle].toString().toLowerCase().includes(searchTerm);
+                    }
+                });
+
+                populateTable(filteredData);
             });
         });
     </script>
